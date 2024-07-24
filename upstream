@@ -1,0 +1,638 @@
+#!/bin/bash
+#
+# Copyright (c) 2024, Masatake YAMATO
+# Copyright (c) 2024, Red Hat, Inc.
+#
+# upstream is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# upstream is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with upstream.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+#
+# Usage:
+#
+#   ./upstream Q kernel
+#   ./upstream lcopyd --cachedir ./cache.d /srv/sources ./lcopy.d
+#
+
+readonly AGENT="\"upstream\" command developed at https://github.com/masatake/upstream"
+readonly CURL=curl
+readonly XSLTPROC=xsltproc
+readonly INTERVAL=5
+
+readonly repolinks_stylesheet=$(cat<<'EOF'
+<?xml version="1.0"?>
+<xsl:stylesheet
+    version="1.0"
+    xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="text"/>
+<xsl:template match="text()"/>
+<xsl:template match="*"><xsl:apply-templates select="*"/></xsl:template>
+<xsl:template match="section[@id = 'Repository_links']/ul">
+  <xsl:for-each select="li">
+    <xsl:call-template name="repo"/>
+  </xsl:for-each>
+</xsl:template>
+<xsl:template name="repo">
+  <xsl:value-of select="a/text()"/>
+  <xsl:text>&#10;</xsl:text>
+</xsl:template>
+</xsl:stylesheet>
+EOF
+         )
+
+readonly homepagelinks_stylesheet=$(cat<<'EOF'
+<?xml version="1.0"?>
+<xsl:stylesheet
+    version="1.0"
+    xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="text"/>
+<xsl:template match="text()"/>
+<xsl:template match="*"><xsl:apply-templates select="*"/></xsl:template>
+<xsl:template match="section[@id = 'Homepage_links']/ul">
+  <xsl:for-each select="li">
+    <xsl:call-template name="repo"/>
+  </xsl:for-each>
+</xsl:template>
+<xsl:template name="repo">
+  <xsl:value-of select="a/text()"/>
+  <xsl:text>&#10;</xsl:text>
+</xsl:template>
+</xsl:stylesheet>
+EOF
+         )
+
+readonly related_project_stylesheet=$(cat<<'EOF'
+<?xml version="1.0"?>
+<xsl:stylesheet
+    version="1.0"
+    xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="text"/>
+<xsl:template match="text()"/>
+<xsl:template match="*"><xsl:apply-templates select="*"/></xsl:template>
+<xsl:template match="table/tbody/tr/td">
+  <xsl:call-template name="related-project"/>
+</xsl:template>
+<xsl:template name="related-project">
+  <xsl:if test="count(a) &gt; 1 and a[2]/text() = '∗'">
+    <xsl:value-of select="a[1]/text()"/>
+    <xsl:text>&#10;</xsl:text>
+  </xsl:if>
+</xsl:template>
+</xsl:stylesheet>
+EOF
+         )
+
+usage()
+{
+    local cmds="Q curl lcopy lcopyd query"
+    local a
+    echo "Usage: "
+    echo
+    echo " $0 ACTION"
+    echo " $0 --help"
+    echo
+    printf "Actions:"
+    for a in $cmds; do
+        printf " \"%s\"" "$a"
+    done
+    echo
+
+    for a in $cmds; do
+	    echo '*' "$a"
+	    "help_$a" "   "
+	    echo
+    done
+
+    exit $1
+}
+
+error()
+{
+    echo "$2" 1>&2
+    exit $1
+}
+
+verify_cmd()
+{
+    if ! type -t "${1}" > /dev/null; then
+        error 1 "\"${1}\": command not found"
+    fi
+}
+
+echo_()
+{
+    printf "%s%s\n" "${1//?/\ }" "$2"
+}
+
+emit_if_git()
+{
+    local group_a=$(echo "$1" | grep '\.git')
+    local group_b=$(echo "$1" | grep -v '\.git')
+
+    if [[ "$group_a" =~ https://git.savannah.gnu.org/cgit/(.*).git$ ]]; then
+	    group_a="https://git.savannah.gnu.org/git/${BASH_REMATCH[1]}.git"
+    fi
+
+    echo "${group_a}"
+    echo "${group_b}"
+}
+
+emit_if_popular_git_site()
+{
+    local l=$1
+
+    # See _link_templates_by_upstream_type in repology-updater/repology/parsers/parsers/gentoo.py
+    if [[ "$l" =~ https://bitbucket.org/[^/]+/[^/]+\.git$ ]]; then
+	    echo ${l}
+    elif [[ "$l" =~ https://bitbucket.org/[^/]+/[^/]+$ ]]; then
+	    echo ${l}.git
+    elif [[ "$l" =~ https://gitlab.freedesktop.org/[^/]+/[^/]+\.git$ ]]; then
+	    echo ${l}
+    elif [[ "$l" =~ https://gitlab.freedesktop.org/[^/]+/[^/]+$ ]]; then
+	    echo ${l}.git
+    elif [[ "$l" =~ https://anongit.gentoo.org/git/repo/proj/[^./]+\.git$ ]]; then
+	    echo ${l}
+    elif [[ "$l" =~ https://anongit.gentoo.org/git/repo/proj/[^./]+$ ]]; then
+	    echo ${l}.git
+    elif [[ "$l" =~ https://gitweb.gentoo.org/repo/proj/[^./]+\.git$ ]]; then
+	    echo ${l}
+    elif [[ "$l" =~ https://gitweb.gentoo.org/repo/proj/[^./]+$ ]]; then
+	    echo ${l}.git
+    elif [[ "$l" =~ https://github.com/[^/]+/[^/]+\.git$ ]]; then
+	    echo ${l}
+    elif [[ "$l" =~ https://github.com/[^/]+/[^/]+$ ]]; then
+	    echo ${l}.git
+    elif [[ "$l" =~ https://gitlab.com/[^/]+/[^/]+\.git$ ]]; then
+	    echo ${l}
+    elif [[ "$l" =~ https://gitlab.com/[^/]+/[^/]+$ ]]; then
+	    echo ${l}.git
+    elif [[ "$l" =~ https://gitlab.gnome.org/[^/]+/[^/]+\.git$ ]]; then
+	    echo ${l}
+    elif [[ "$l" =~ https://gitlab.gnome.org/[^/]+/[^/]+$ ]]; then
+	    echo ${l}.git
+    elif [[ "$l" =~ https://savannah.gnu.org/projects/([^/]+)$ ]]; then
+	    echo https://git.savannah.gnu.org/git/${BASH_REMATCH[1]}.git
+    elif [[ "$l" =~ https://savannah.nongnu.org/projects/([^/]+)$ ]]; then
+	    echo https://git.savannah.nongnu.org/git/${BASH_REMATCH[1]}.git
+    elif [[ "$l" =~ https://sr.ht/([^/]+/[^/]+)$ ]]; then
+	    echo https://git.sr.ht/${BASH_REMATCH[1]}
+    elif [[ "$l" =~ https://git.kernel.org/pub/.*\.git$ ]]; then
+	    echo "$l"
+    elif [[ "$l" =~ https://pagure.io/[^/]+\.git$ ]]; then
+	    echo "$l"
+    elif [[ "$l" =~ https://pagure.io/[^/]+$ ]]; then
+	    echo "$l".git
+    fi
+
+    # https://foss.heptapod.net/{} ???
+}
+
+is_gone()
+{
+    grep -q '<title>Gone project .* - Repology</title>' <<<"$1"
+}
+
+take1()
+{
+    grep -v '^$' | head -1
+}
+
+do_query()
+{
+    declare -r action=query
+    local pkg
+    local input
+    local provider
+    local html
+    local cachedir
+    local cachedir1
+
+    while [[ $# -gt 0 ]]; do
+	    case $1 in
+	        (-h|--help|-help)
+		        help_${action}
+		        exit 0
+		        ;;
+	        (--cachedir)
+		        shift
+		        cachedir=$1
+		        shift
+		        if [[ ! -d "$cachedir" ]]; then
+		            error 1 "${action} --cachedir: no such directory: $cachedir"
+		        fi
+		        if [[ ! -w "$cachedir" ]]; then
+		            error 1 "${action} --cachedir: readonly directory: $cachedir"
+		        fi
+		        ;;
+	        (--input|-i)
+		        shift
+		        input=$1
+		        shift
+		        if [[ -z "$input" ]]; then
+		            error 1 "${action} --input: no input file given"
+		        fi
+		        if [[ ! -f "$input" ]]; then
+		            error 1 "${action}: no such file: $input"
+		        fi
+		        if [[ ! -r "$input" ]]; then
+		            error 1 "${action}: not readable: $input"
+		        fi
+		        break
+		        ;;
+	        (-*)
+		        error 1 "${action}: unknown option: $1"
+		        ;;
+	        (*)
+		        break
+		        ;;
+	    esac
+    done
+
+    if [[ -n "$input" ]]; then
+	    provider="cat $input"
+    elif [[ $# -ne 1 ]]; then
+	    error 1 "${action}: unexpected number of arguments"
+    else
+	    pkg=$1
+	    if [[ -n "$cachedir" ]]; then
+	        cachedir1="$cachedir"/"${pkg:0:1}"
+	        mkdir -p "$cachedir1"
+	    fi
+	    provider="do_curl $pkg"
+    fi
+
+    verify_cmd "${XSLTPROC}"
+
+    if ! html=$($provider); then
+	    error 1 "failure in '$provider'"
+    fi
+
+    if [[ -n "$cachedir1" ]]; then
+	    echo "$html" > "$cachedir1"/"${pkg}.html"
+    fi
+
+    if is_gone "$html"; then
+	    local related_project=$("${XSLTPROC}" --novalid --html <(echo "$related_project_stylesheet") <(echo "$html") 2> /dev/null | take1)
+	    if [[ -n "${related_project}" ]]; then
+	        # TODO: use the cache
+	        do_query "${related_project}"
+	        return $?
+	    fi
+
+        # TODO: If "<p><b>N</b> project(s) on this page</p>" is found in the html, we can dig the project(s) more.
+        #
+	    # local projects_on_this_page=$("${XSLTPROC}" --novalid --html <(echo "$project_on_this_page_stylesheet") <(echo "$html") 2> /dev/null | take1)
+	    # if [[ -n "${projects_on_this_page}" ]]; then
+	    #     :
+	    # fi
+
+    fi
+
+    local repolinks=$("${XSLTPROC}" --novalid --html <(echo "$repolinks_stylesheet") <(echo "$html") 2> /dev/null | sort -u)
+    if [[ -n "$repolinks"  ]]; then
+	    local repo=$(emit_if_git "$repolinks" | take1)
+	    [[ -z "$repo" ]] && return 2
+	    echo "$repo"
+	    return 0
+    fi
+
+    local homepagelinks=$("${XSLTPROC}" --novalid --html <(echo "$homepagelinks_stylesheet") <(echo "$html") 2> /dev/null | sort -u)
+    local page
+    local repo=$(for page in $homepagelinks; do
+		             emit_if_popular_git_site "$page"
+		         done  | take1)
+    [[ -z "$repo" ]] && return 2
+    echo "$repo"
+    return 0
+}
+
+help_Q()
+{
+    declare -r action=Q
+    echo
+    echo_ "$1" "\"${action}\" is an alias for \"query\"."
+}
+
+help_query()
+{
+    declare -r action=query
+    echo
+    echo "${1}\$ $0 ${action} [--cachedir CACHEDIR] PKG"
+    echo "${1}\$ $0 ${action} --input INPUT.HTML"
+    echo
+    echo_ "$1" "\"${action}\" tries reporting the git repository of the upstream project for PKG."
+    echo_ "$1" "\"${action}\" downloads the html page for PKG from repology.org and then extracts"
+    echo_ "$1" "the repository information from it. This command stores the page to"
+    echo_ "$1" 'CACHEDIR/${PKG:0:1}/${PKG}.lcpy2'" if \"--cachedir\" option is given. The"
+    echo_ "$1" "command uses CACHEDIR only for storing; it doesn't read the files under"
+    echo_ "$1" "CACHEDIR. If you want to use only the function extracting the repository"
+    echo_ "$1" "information from a html file, use \"--input\" option."
+    echo
+    echo_ "$1" "exit status:"
+    echo_ "$1 " "0: the action reports something informative."
+    echo_ "$1 " "1: the action gets an error."
+    echo_ "$1 " "2: the action cannot find anything informative."
+}
+
+do_curl()
+{
+    declare -r action=curl
+    local pkg
+
+    while [[ $# -gt 0 ]]; do
+	    case $1 in
+	        (-h|--help|-help)
+		        help_${action}
+		        exit 0
+		        ;;
+	        (-*)
+		        error 1 "${action}: unknown option: $1"
+		        ;;
+	        (*)
+		        break
+		        ;;
+	    esac
+    done
+
+    if [[ $# -ne 1 ]]; then
+	    error 1 "${action}: unexpected number of arguments"
+    fi
+
+    pkg=$1
+
+    verify_cmd "${CURL}"
+
+    sleep "${INTERVAL:-5}"
+    "${CURL}" -s -L -A "$AGENT" "https://repology.org/project/$pkg/information"
+}
+
+help_curl()
+{
+    declare -r action=curl
+    echo
+    echo "${1}\$ $0 ${action} PKG"
+    echo
+    echo_ "$1" "\"${action}\" downloads the html page for PKG from repology.org and print the page"
+    echo_ "$1" "to stdout. This command is the lowest level command; it never uses local"
+    echo_ "$1" "caches."
+}
+
+do_lcopy()
+{
+    declare -r action=lcopy
+    local pkg
+    local input
+    local provider
+    local opts
+    local cachedir
+    local no_date
+
+    while [[ $# -gt 0 ]]; do
+	    case $1 in
+	        (-h|--help|-help)
+		        help_${action}
+		        exit 0
+		        ;;
+	        (--no-date)
+		        shift
+		        no_date=1
+		        ;;
+	        (--cachedir)
+		        shift
+		        cachedir=$1
+		        shift
+		        ;;
+	        (--input|-i)
+		        shift
+		        input=$1
+		        shift
+		        if [[ -z "$input" ]]; then
+		            error 1 "${action} --input: no input file given"
+		        fi
+		        if [[ ! -f "$input" ]]; then
+		            error 1 "${action}: no such file: $input"
+		        fi
+		        if [[ ! -r "$input" ]]; then
+		            error 1 "${action}: not readable: $input"
+		        fi
+		        break
+		        ;;
+	        (-*)
+		        error 1 "${action}: unknown option: $1"
+		        ;;
+	        (*)
+		        break
+		        ;;
+	    esac
+    done
+
+    if [[ $# -ne 1 ]]; then
+	    error 1 "${action}: unexpected number of arguments"
+    fi
+
+    if [[ -n "$input" && -n "$cachedir" ]]; then
+	    error 1 "${action}: don't specify --input and --cachedir together"
+    fi
+
+    pkg=$1
+
+    # v0 is used at the original lcopy running on sources.
+    # v1 is used in universe-ctags/codebase project.
+    echo LCOPY=v2
+    echo PACKAGE=$pkg
+    echo SOURCE="https://repology.org/project/$pkg/information"
+    if [[ -z "$no_date" ]]; then
+	    echo DATE="$(date --rfc-3339 date)"
+    fi
+    printf "REPO="
+    if [[ -n "$input" ]]; then
+	    do_query --input $input
+    elif [[ -n "$cachedir" ]]; then
+	    do_query --cachedir "$cachedir" $pkg
+    else
+	    do_query $pkg
+    fi
+}
+
+help_lcopy()
+{
+    declare -r action=lcopy
+    echo
+    echo "${1}\$ $0 ${action} [--no-date] [--cachedir CACHEDIR] PKG"
+    echo "${1}\$ $0 ${action} [--no-date] [--input INPUT.html] PKG"
+    echo
+    echo_ "$1" "\"${action}\" prints the git repository for PKG in lcopy format."
+    echo_ "$1" "CACHEDIR is only for storing the html page for the PKG. See also \"query\""
+    echo_ "$1" "action about \"--cachedir\" option. If \"--input\" option is given, INPUT.html"
+    echo_ "$1" "\"${action}\" uses it as the input source instead of downloading the html page"
+    echo_ "$1" "from repology.org."
+}
+
+do_lcopyd()
+{
+    declare -r action=lcopyd
+    local sources_root
+    local lcopydir
+
+    while [[ $# -gt 0 ]]; do
+	    case $1 in
+	        (-h|--help|-help)
+		        help_${action}
+		        exit 0
+		        ;;
+	        (--cachedir)
+		        shift
+		        cachedir=$1
+		        shift
+		        if [[ ! -d "$cachedir" ]]; then
+		            error 1 "${action} --cachedir: no such directory: $cachedir"
+		        fi
+		        if [[ ! -w "$cachedir" ]]; then
+		            error 1 "${action} --cachedir: readonly directory: $cachedir"
+		        fi
+		        ;;
+	        (-*)
+		        error 1 "${action}: unknown option: $1"
+		        ;;
+	        (*)
+		        break
+		        ;;
+	    esac
+    done
+
+    if [[ $# -ne 2 ]]; then
+	    error 1 "${action}: unexpected number of arguments"
+    fi
+
+    sources_root=$1
+    shift
+
+    if [[ ! -d "$sources_root" ]]; then
+	    error 1 "${action}: not a directory: $sources_root"
+    fi
+
+    if [[ ! -r "$sources_root" ]]; then
+	    error 1 "${action}: unreadable: $sources_root"
+    fi
+
+    if [[ ! -r "${sources_root}/sources" ]]; then
+	    error 1 "${action}: unexpected directory structure: $sources_root"
+    fi
+
+    lcopydir=$1
+    shift
+
+    if [[ ! -d "$lcopydir" ]]; then
+	    error 1 "${action}: not a directory: $lcopydir"
+    fi
+
+    if [[ ! -x "$lcopydir" ]]; then
+	    error 1 "${action}: untraversable: $lcopydir"
+    fi
+
+    if [[ ! -r "$lcopydir" ]]; then
+	    error 1 "${action}: unreadable: $lcopydir"
+    fi
+
+    if [[ ! -w "$lcopydir" ]]; then
+	    error 1 "${action}: unwritable: $lcopydir"
+    fi
+
+    local c
+    local n
+    for c in $sources_root/sources/*; do
+	    if [[ $(basename "$c") == '*' ]]; then
+	        continue
+	    fi
+
+	    for n in $c/*; do
+	        local pkg=
+
+	        for v in $n/^rhel-[9]*-iso; do
+		        if [[ -L "$v" ]]; then
+		            pkg=${n##*/}
+		            break
+		        fi
+	        done
+
+	        if [[ -z "$pkg" ]]; then
+		        continue
+	        fi
+
+	        local input
+	        local c0=${pkg:0:1}
+	        local html="${cachedir}/$c0/${pkg}.html"
+	        local lcopy=${lcopydir}/${c0}/${pkg}.lcpy2
+
+	        if [[ -e "${lcopy}" ]]; then
+		        continue
+	        fi
+
+	        if [[ ! -d ${lcopydir}/${c0} ]]; then
+		        mkdir -p ${lcopydir}/${c0}
+	        fi
+
+	        if [[ -f "${html}" ]]; then
+		        do_lcopy --input "${html}" "${pkg}" > "${lcopy}"
+	        else
+		        do_lcopy --cachedir "${cachedir}" "${pkg}" > "${lcopy}"
+	        fi
+	    done
+    done
+}
+
+help_lcopyd()
+{
+    declare -r action=lcopyd
+    echo
+    echo "${1}\$ $0 ${action} [--cachedir CACHEDIR] SOURCES-ROOT LCOPYDIR"
+}
+
+main()
+{
+    while [[ $# -gt 0 ]]; do
+	    case $1 in
+	        (help|-h|--help|-help)
+		        usage 0
+		        ;;
+	        (lcopyd)
+		        shift
+		        do_lcopyd "$@"
+		        exit $?
+		        ;;
+	        (lcopy)
+		        shift
+		        do_lcopy "$@"
+		        exit $?
+		        ;;
+	        (query|Q)
+		        shift
+		        do_query "$@"
+		        exit $?
+		        ;;
+	        (curl)
+		        shift
+		        do_curl "$@"
+		        exit $?
+		        ;;
+	        (-*)
+		        error 1 "unknown option: $1"
+		        ;;
+	        (*)
+		        error 1 "unknown subcommand: $1"
+		        ;;
+	    esac
+    done
+}
+
+main "$@"

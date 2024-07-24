@@ -1,0 +1,11 @@
+root = true
+
+[*]
+end_of_line = lf
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[upstream]
+indent_size = 4
+indent_style = space
+tab_width = 4
