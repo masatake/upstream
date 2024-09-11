@@ -333,7 +333,7 @@ help_query()
     echo_ "$1" "\"${action}\" tries reporting the git repository of the upstream project for PKG."
     echo_ "$1" "\"${action}\" downloads the html page for PKG from repology.org and then extracts"
     echo_ "$1" "the repository information from it. This command stores the page to"
-    echo_ "$1" 'CACHEDIR/${PKG:0:1}/${PKG}.lcpy2'" if \"--cachedir\" option is given. The"
+    echo_ "$1" 'CACHEDIR/${PKG:0:1}/${PKG}.lcopy'" if \"--cachedir\" option is given. The"
     echo_ "$1" "command uses CACHEDIR only for storing; it doesn't read the files under"
     echo_ "$1" "CACHEDIR. If you want to use only the function extracting the repository"
     echo_ "$1" "information from a html file, use \"--input\" option."
@@ -391,9 +391,8 @@ do_lcopy()
 {
     declare -r action=lcopy
     local pkg
+    local repo
     local input
-    local provider
-    local opts
     local cachedir
     local no_date
 
@@ -445,22 +444,30 @@ do_lcopy()
     fi
 
     pkg=$1
+    if repo=$(if [[ -n "$input" ]]; then
+	              do_query --input "$input"
+              elif [[ -n "$cachedir" ]]; then
+	              do_query --cachedir "$cachedir" "$pkg"
+              else
+	              do_query "$pkg"
+              fi); then
+        echo '# -*- shell-script -*'
+        echo GIT_CF_VERSION=0.0.1
+        echo GIT_REPOSITORY="$repo"
+        echo GIT_BRANCH=
 
-    # v0 is used at the original lcopy running on sources.
-    # v1 is used in universe-ctags/codebase project.
-    echo LCOPY=v2
-    echo PACKAGE=$pkg
-    echo SOURCE="https://repology.org/project/$pkg/information"
-    if [[ -z "$no_date" ]]; then
-	    echo DATE="$(date --rfc-3339 date)"
-    fi
-    printf "REPO="
-    if [[ -n "$input" ]]; then
-	    do_query --input $input
-    elif [[ -n "$cachedir" ]]; then
-	    do_query --cachedir "$cachedir" $pkg
+        echo LCOPY_CF_VERSION=0.4.0
+        echo LCOPY_VCS="git"
+        echo LCOPY_PACKAGE="$pkg"
+        echo LCOPY_BRANCH=
+        echo LCOPY_UPDATE=yes
+        echo LCOPY_GENERATED_BY="upstream+https://repology.org/project/$pkg/information"
+        if [[ -z "$no_date" ]]; then
+	        echo LCOPY_DATE="$(date --rfc-3339 date)"
+        fi
+        return 0
     else
-	    do_query $pkg
+        return $?
     fi
 }
 
@@ -572,7 +579,7 @@ do_lcopyd()
 	        local input
 	        local c0=${pkg:0:1}
 	        local html="${cachedir}/$c0/${pkg}.html"
-	        local lcopy=${lcopydir}/${c0}/${pkg}.lcpy2
+	        local lcopy=${lcopydir}/${c0}/${pkg}.lcopy
 
 	        if [[ -e "${lcopy}" ]]; then
 		        continue
@@ -582,11 +589,16 @@ do_lcopyd()
 		        mkdir -p ${lcopydir}/${c0}
 	        fi
 
-	        if [[ -f "${html}" ]]; then
-		        do_lcopy --input "${html}" "${pkg}" > "${lcopy}"
-	        else
-		        do_lcopy --cachedir "${cachedir}" "${pkg}" > "${lcopy}"
-	        fi
+	        if if [[ -f "${html}" ]]; then
+		           do_lcopy --input "${html}" "${pkg}" > "${lcopy}"
+	           else
+		           do_lcopy --cachedir "${cachedir}" "${pkg}" > "${lcopy}"
+	           fi; then
+                :
+            else
+                rm "${lcopy}"
+            fi
+
 	    done
     done
 }
