@@ -1,7 +1,9 @@
 catatonit => https://github.com/openSUSE/catatonit.git
+freeipmi => https://git.savannah.gnu.org/git/freeipmi.git
 gcc => https://gcc.gnu.org/git/gcc.git
 glibc => https://sourceware.org/git/glibc.git
 httpd => https://github.com/apache/httpd
 iproute => https://git.kernel.org/pub/scm/network/iproute2/iproute2.git
+subscription-manager => https://github.com/candlepin/subscription-manager.git
 wireshark => https://gitlab.com/wireshark/wireshark.git
 zsh => https://git.code.sf.net/p/zsh/code.git

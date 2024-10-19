@@ -139,7 +139,7 @@ emit_if_git()
     local group_a=$(echo "$1" | grep '\.git')
     local group_b=$(echo "$1" | grep -v '\.git')
 
-    if [[ "$group_a" =~ https://git.savannah.gnu.org/cgit/(.*).git$ ]]; then
+    if [[ "$group_a" =~ https://git.savannah.gnu.org/cgit/(.*).git/?$ ]]; then
 	    group_a="https://git.savannah.gnu.org/git/${BASH_REMATCH[1]}.git"
     fi
 
@@ -192,6 +192,12 @@ emit_if_popular_git_site()
 	    echo "$l"
     elif [[ "$l" =~ https://pagure.io/[^/]+$ ]]; then
 	    echo "$l".git
+    else
+        case "$l" in
+            (*/)
+            emit_if_popular_git_site "${l::-1}"
+            ;;
+        esac
     fi
 
     # https://foss.heptapod.net/{} ???
