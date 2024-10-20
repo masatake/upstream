@@ -1,4 +1,5 @@
 catatonit => https://github.com/openSUSE/catatonit.git
+dmidecode => http://git.savannah.nongnu.org/git/dmidecode.git
 freeipmi => https://git.savannah.gnu.org/git/freeipmi.git
 gcc => https://gcc.gnu.org/git/gcc.git
 glibc => https://sourceware.org/git/glibc.git
